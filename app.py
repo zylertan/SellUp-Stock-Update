@@ -17,22 +17,78 @@ Workflow each run:
 """
 
 import io
+import os
+import base64
 import pandas as pd
 import streamlit as st
 
 import sellup_core as sc
 
-st.set_page_config(page_title="SellUp Stock Sync", page_icon="📦", layout="wide")
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
-st.title("📦 SellUp Stock Bulk-Update Sync")
-st.caption(
-    "Matches your Masterlist to the SellUp dealer inventory file and writes the "
-    "correct Seller Qty per condition. Prices are never touched."
+
+def _logo_data_uri():
+    """Return a data URI for the MM logo if mm_logo.png is present, else None."""
+    for name in ("mm_logo.png", "mm-logo.png", "mister_mobile.png"):
+        p = os.path.join(_APP_DIR, name)
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                return "data:image/png;base64," + base64.b64encode(f.read()).decode()
+    return None
+
+st.set_page_config(page_title="Mister Mobile · SellUp Stock Sync",
+                   page_icon="📦", layout="wide")
+
+# ---- Mister Mobile brand styling ----
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Open+Sans:wght@400;600&display=swap');
+    html, body, [class*="css"], .stMarkdown, p, li, label, div { font-family: 'Open Sans', sans-serif; }
+    h1, h2, h3, h4 { font-family: 'Montserrat', sans-serif !important; font-weight: 800 !important; color: #000; }
+    /* MM header banner */
+    .mm-banner { background: #FFEB00; border-radius: 16px; padding: 18px 24px; display: flex;
+                 align-items: center; gap: 20px; margin-bottom: 8px; }
+    .mm-logo-chip { background: #fff; border-radius: 12px; padding: 8px 12px; display: flex; align-items: center; }
+    .mm-logo-chip img { height: 56px; display: block; }
+    .mm-mark { width: 54px; height: 54px; background: #000; border-radius: 50%; display: flex;
+               align-items: center; justify-content: center; color: #FFEB00; font-family: 'Montserrat';
+               font-weight: 800; font-size: 22px; flex: none; }
+    .mm-title { font-family: 'Montserrat'; font-weight: 800; font-size: 26px; color: #000; line-height: 1.1; }
+    .mm-tag { font-family: 'Open Sans'; font-weight: 600; font-size: 14px; color: #000; opacity: 0.75; }
+    .mm-strip { height: 6px; background: #000; border-radius: 3px; margin: 0 0 22px; }
+    /* buttons yellow/black */
+    .stButton > button, .stDownloadButton > button {
+        background: #FFEB00 !important; color: #000 !important; border: 2px solid #000 !important;
+        border-radius: 10px !important; font-family: 'Montserrat' !important; font-weight: 700 !important; }
+    .stButton > button:hover, .stDownloadButton > button:hover { background: #000 !important; color: #FFEB00 !important; }
+    .stButton > button:disabled, .stDownloadButton > button:disabled {
+        background: #EDEDED !important; color: #6D6962 !important; border-color: #D6D6D6 !important; }
+    [data-testid="stMetricValue"] { font-family: 'Montserrat'; color: #000; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+_logo = _logo_data_uri()
+_logo_html = (f'<div class="mm-logo-chip"><img src="{_logo}" alt="Mister Mobile"/></div>'
+              if _logo else '<div class="mm-mark">MM</div>')
+st.markdown(
+    f"""
+    <div class="mm-banner">
+      {_logo_html}
+      <div>
+        <div class="mm-title">SellUp Stock Sync</div>
+        <div class="mm-tag">Mister Mobile · Dealer Inventory Bulk Update</div>
+      </div>
+    </div>
+    <div class="mm-strip"></div>
+    """,
+    unsafe_allow_html=True,
 )
 
 st.markdown(
     "#### How to use\n"
-    "1. **Upload** the Masterlist, the SellUp export, and the SellUp Data crosswalk below.\n"
+    "1. **Upload** the Masterlist and the SellUp export below.\n"
     "2. **Download the Match Review registry**, open the **New Masterlist SKUs** tab, "
     "and set a **Reviewer Decision** for *every* row (Linked + SellUp SKU ID, or "
     "Not on SellUp Yet / Not Selling / Skipped).\n"
@@ -60,12 +116,8 @@ with col2:
     sellup_file = st.file_uploader("2️⃣ SellUp export (INVENTORIES_*.xlsx)", type=["xlsx"])
 
 registry_file = st.file_uploader(
-    "3️⃣ (Optional) Previously-reviewed registry to carry decisions forward",
-    type=["xlsx"],
-)
-crosswalk_file = st.file_uploader(
-    "4️⃣ (Optional) Known-good ID map — 'SellUp Data' "
-    "(Masterlist Stock Type ID ↔ SellUp SKU ID)",
+    "3️⃣ Reviewed registry (re-upload your completed SellUp_Match_Review.xlsx to "
+    "carry your confirmed links & decisions forward)",
     type=["xlsx"],
 )
 
@@ -100,13 +152,18 @@ if master_file and sellup_file:
     with st.spinner("Matching…"):
         master = sc.load_masterlist(master_file)
         rows_by_sheet, wb_sell = sc.load_sellup(sellup_file)
-        crosswalk = sc.read_crosswalk(crosswalk_file) if crosswalk_file else {}
-        results, unmatched = sc.match(master, rows_by_sheet, crosswalk=crosswalk)
-        promoted = 0
+        # Confirmed links & decisions are carried forward from the reviewed
+        # registry (its Locked Matches + New Masterlist SKU links).
+        crosswalk = {}
         prior = {}
+        promoted = 0
         if registry_file is not None:
-            results, promoted = _apply_prior_decisions(results, registry_file.getvalue())
-            prior = sc.read_prior_decisions(registry_file)
+            reg_bytes = registry_file.getvalue()
+            crosswalk = sc.read_registry_links(io.BytesIO(reg_bytes))
+            prior = sc.read_prior_decisions(io.BytesIO(reg_bytes))
+        results, unmatched = sc.match(master, rows_by_sheet, crosswalk=crosswalk)
+        if registry_file is not None:
+            results, promoted = _apply_prior_decisions(results, reg_bytes)
         # freebies + carried-forward New Masterlist SKU decisions (write path)
         results_final, buckets = sc.reconcile_decisions(
             results, unmatched, rows_by_sheet, prior)
